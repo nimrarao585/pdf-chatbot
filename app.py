@@ -1,6 +1,5 @@
-# ============ ALL IMPORTS ============
 import os, re, traceback
-import gradio as gr
+import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -10,19 +9,33 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains.retrieval import create_retrieval_chain
 
-# ============ GLOBALS ============
-vector_store = None
-retriever = None
-rag_chain = None
+# ============ PAGE CONFIG ============
+st.set_page_config(page_title="AI PDF Chatbot", page_icon="📄")
+
+# ============ API KEY ============
+# On Streamlit Community Cloud, set GROQ_API_KEY under "Secrets" in app settings.
+# Locally, you can set it as an environment variable before running.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
+if not GROQ_API_KEY:
+    st.error("❌ GROQ_API_KEY is not set. Add it under your app's Secrets (Streamlit Cloud) "
+              "or as an environment variable (local).")
+    st.stop()
+os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+
+# ============ SESSION STATE ============
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
+if "retriever" not in st.session_state:
+    st.session_state.retriever = None
+if "rag_chain" not in st.session_state:
+    st.session_state.rag_chain = None
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # ============ PROCESS PDF ============
-def process_pdf(pdf_file):
-    global vector_store, retriever
-    print("PDF path Gradio gave me:", pdf_file)  # debug line, safe to keep
-    if pdf_file is None:
-        return "❌ Please upload a PDF."
+def process_pdf(pdf_path):
     try:
-        loader = PyPDFLoader(pdf_file)
+        loader = PyPDFLoader(pdf_path)
         documents = loader.load()
 
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -32,16 +45,18 @@ def process_pdf(pdf_file):
         vector_store = FAISS.from_documents(chunks, embeddings)
         retriever = vector_store.as_retriever(search_kwargs={"k": 4})
 
-        return f"✅ PDF processed successfully!\n\nPages Loaded: {len(documents)}\nChunks Created: {len(chunks)}"
-    except Exception as e:
+        st.session_state.vector_store = vector_store
+        st.session_state.retriever = retriever
+
+        return True, f"✅ PDF processed successfully!\n\nPages Loaded: {len(documents)}\nChunks Created: {len(chunks)}"
+    except Exception:
         traceback.print_exc()
-        return f"❌ Error:\n{traceback.format_exc()}"
+        return False, f"❌ Error:\n{traceback.format_exc()}"
 
 # ============ CREATE CHAIN ============
 def create_chain():
-    global rag_chain
-    if retriever is None:
-        return "❌ Upload and process a PDF first."
+    if st.session_state.retriever is None:
+        return False, "❌ Upload and process a PDF first."
     llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
     prompt = ChatPromptTemplate.from_template("""
 You are a helpful AI assistant. Answer ONLY from the provided PDF context.
@@ -56,21 +71,13 @@ Question:
 Answer:
 """)
     document_chain = create_stuff_documents_chain(llm, prompt)
-    rag_chain = create_retrieval_chain(retriever, document_chain)
-    return "✅ Chatbot Ready!"
-
-# ============ PROCESS + PREPARE ============
-def process_and_prepare(pdf_path):
-    if pdf_path is None:
-        return "❌ Please upload a PDF."
-    msg = process_pdf(pdf_path)
-    if "successfully" in msg.lower():
-        msg += "\n\n" + create_chain()
-    return msg
+    st.session_state.rag_chain = create_retrieval_chain(st.session_state.retriever, document_chain)
+    return True, "✅ Chatbot Ready!"
 
 # ============ ASK QUESTION ============
-def ask_question(message, history):
-    global rag_chain, vector_store
+def ask_question(message):
+    rag_chain = st.session_state.rag_chain
+    vector_store = st.session_state.vector_store
 
     if rag_chain is None or vector_store is None:
         return "❌ Please upload and process the PDF first."
@@ -119,29 +126,45 @@ def ask_question(message, history):
         traceback.print_exc()
         return f"❌ Error:\n{e}"
 
-# ============ API KEY ============
-# On Render, set GROQ_API_KEY under the "Environment" tab of your service.
-# We no longer use getpass() here because a live server has no keyboard input —
-# the app would hang forever waiting for you to type a key.
-if "GROQ_API_KEY" not in os.environ:
-    raise RuntimeError(
-        "GROQ_API_KEY environment variable is not set. "
-        "Add it in Render under your service's Environment tab."
-    )
+# ============ UI ============
+st.title("📄 AI PDF Chatbot")
 
-# ============ GRADIO APP ============
-with gr.Blocks() as demo:
-    gr.Markdown("# 📄 AI PDF Chatbot")
-    pdf = gr.File(label="Upload PDF", file_types=[".pdf"], type="filepath")
-    status = gr.Textbox(label="Status", interactive=False)
-    process_btn = gr.Button("📄 Process PDF")
-    process_btn.click(fn=process_and_prepare, inputs=pdf, outputs=status)
-    gr.ChatInterface(fn=ask_question, title="💬 Chat with your PDF")
+uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 
-# share=True was a Colab-only trick to get a temporary public link.
-# On Render, we bind to 0.0.0.0 and the PORT Render assigns us instead.
-if __name__ == "__main__":
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=int(os.environ.get("PORT", 7860)),
-    )
+if uploaded_file is not None:
+    if st.button("📄 Process PDF"):
+        with st.spinner("Processing PDF..."):
+            # Save uploaded file to a temp path so PyPDFLoader can read it
+            temp_path = os.path.join("/tmp", uploaded_file.name)
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            ok, msg = process_pdf(temp_path)
+            if ok:
+                chain_ok, chain_msg = create_chain()
+                msg += "\n\n" + chain_msg
+            st.session_state.status_message = msg
+
+if "status_message" in st.session_state:
+    st.info(st.session_state.status_message)
+
+st.divider()
+st.subheader("💬 Chat with your PDF")
+
+# Display chat history
+for role, content in st.session_state.messages:
+    with st.chat_message(role):
+        st.markdown(content)
+
+# Chat input
+user_input = st.chat_input("Ask a question about your PDF...")
+if user_input:
+    st.session_state.messages.append(("user", user_input))
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            answer = ask_question(user_input)
+            st.markdown(answer)
+    st.session_state.messages.append(("assistant", answer))
