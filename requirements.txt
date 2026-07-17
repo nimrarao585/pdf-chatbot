@@ -1,3 +1,4 @@
+streamlit
 langchain==0.3.27
 langchain-community==0.3.27
 langchain-core==0.3.75
@@ -7,4 +8,3 @@ langchain-groq==0.3.7
 faiss-cpu
 sentence-transformers
 pypdf
-gradio
